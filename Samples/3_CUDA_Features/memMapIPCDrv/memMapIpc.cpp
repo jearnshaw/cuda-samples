@@ -45,6 +45,9 @@
 // includes, CUDA
 #include <builtin_types.h>
 
+#include <chrono>
+#include <thread>
+
 using namespace std;
 
 // For direct NVLINK and PCI-E peers, at max 8 simultaneous peers are allowed
@@ -53,7 +56,7 @@ using namespace std;
 #define MAX_DEVICES (32)
 
 #define PROCESSES_PER_DEVICE 1
-#define DATA_BUF_SIZE 4ULL * 1024ULL * 1024ULL
+#define DATA_BUF_SIZE 2ULL * 1024ULL * 1024ULL * 1024ULL // 2GB
 
 static const char ipcName[] = "memmap_ipc_pipe";
 static const char shmName[] = "memmap_ipc_shm";
@@ -413,6 +416,11 @@ static void childProcess(int devId, int id, char **argv) {
   // cuMemAddressReserve.
   memMapUnmapAndFreeMemory(d_ptr, procCount * DATA_BUF_SIZE);
 
+  printf("memory freed on child process\n");
+
+  printf("child process waiting for 30s before exiting... (physical memory is not released at this stage)\n");
+  std::this_thread::sleep_for(std::chrono::seconds(60));
+
   exit(EXIT_SUCCESS);
 }
 
@@ -572,10 +580,22 @@ static void parentProcess(char *app) {
   checkIpcErrors(
       ipcSendShareableHandles(ipcParentHandle, shHandles, processes));
 
+  std::this_thread::sleep_for(std::chrono::seconds(5));
+
   // Close the shareable handles as they are not needed anymore.
   for (int i = 0; i < nprocesses; i++) {
     checkIpcErrors(ipcCloseShareableHandle(shHandles[i]));
   }
+
+  // Free memory and handles before waiting on process to exit
+  for (i = 0; i < nprocesses; i++) {
+      checkCudaErrors(cuMemRelease(allocationHandles[i]));
+  }
+
+  checkIpcErrors(ipcCloseSocket(ipcParentHandle));
+  sharedMemoryClose(&info);
+
+  printf("memory freed on parent process\n");
 
   // And wait for them to finish
   for (i = 0; i < processes.size(); i++) {
@@ -585,12 +605,12 @@ static void parentProcess(char *app) {
     }
   }
 
-  for (i = 0; i < nprocesses; i++) {
-    checkCudaErrors(cuMemRelease(allocationHandles[i]));
-  }
+  printf("child process exited\n");
+     
+  printf("parent process waiting for 30s before exiting... (physical memory has now been released)\n");
+  std::this_thread::sleep_for(std::chrono::seconds(30));
 
-  checkIpcErrors(ipcCloseSocket(ipcParentHandle));
-  sharedMemoryClose(&info);
+  printf("all done!\n");
 }
 
 // Host code
